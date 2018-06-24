@@ -1,0 +1,235 @@
+---
+title: "The betaboost package: A software tool for modeling bounded outcome variables in potentially high-dimensional epidemiological data -- Appendix"
+author: "Andreas Mayr, Leonie Weinhold, Benjamin Hofner, Stephanie Titze, Olaf Gefeller, Matthias Schmid"
+date: ""
+output:
+  html_document:
+    keep_md: yes
+---
+
+<!--
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteIndexEntry{Using package betaboost}
+-->
+
+## Preparations and initialisation
+
+In order to be able to execute the following code, one first needs to install 
+the following packages (along with `betaboost`):
+```{r initialization, eval = FALSE}
+## Install packages
+install.packages(c("betareg"))       ## install betareg for comparison of results  
+```
+
+Next, we load the `betaboost` package
+```{r load_package, message=FALSE, warning=FALSE}
+library("betaboost")                 ## load betaboost
+```
+
+## Example 1: Comparison of various boosted models
+
+First, we analyse publicly available data on health-realated quality of life of 60 patients. The data set was originally published as `dataqol2` in the `QoLR` package and later added to `betareg`. The explanatory variables are the treatment group (`arm`) and an additional score measuring the patients `pain`. First, we load and preprocess the data:
+
+```{r load_data}
+## load data
+# data("dataqol2", package = "QoLR")
+data(dataqol2)
+## take one time-point
+dataqol <- dataqol2[dataqol2$time ==0,]
+## remove missings
+dataqol <- dataqol[complete.cases(dataqol[,c("QoL", "arm", "pain")]),]
+## rescale outcome to [0,1]
+dataqol$QoL <- dataqol$QoL/100
+```
+
+### Raw data
+
+The data set consists of `r ncol(dataqol)` variables and `r nrow(dataqol)`
+observations.
+```{r}
+str(dataqol)
+``` 
+
+The raw outcome is distributed as follows (histogram of the Quality of Life with smooth kernel density estimate for its empirical distribution).
+```{r outcome}
+hist(dataqol$QoL, breaks = 20, col = "lightgrey", 
+     main = "Quality of life", prob = TRUE, las = 1)
+lines(density(dataqol$QoL), col = 2, lwd = 2)
+```
+
+The influence of various predictors on the outcome is depicted in the following: First, boxplots comparing the Quality of Life outcome for both treatment arms. 
+```{r}
+## QOL by treatment arm
+boxplot(QoL ~ arm, data = dataqol, names = c("A","B"), las = 1,
+        col = "lightgrey", ylab = "Qualitiy of life")
+```
+
+Second, a scatterplot for the relationship between the explanatory variable `pain` (x-axis) and the outcome variable (y-axis):
+```{r}
+## QOL by pain
+plot(QoL ~ pain, data = dataqol, pch = 19, las = 1)
+abline(lm(QoL ~ pain, data = dataqol))
+```
+
+### Boosted beta models
+
+First, we fit a classical beta regression with linear effects
+```{r}
+beta1 <- betaboost(QoL ~ pain + arm, data = dataqol)
+coef(beta1, off2int = TRUE)
+```
+the precission parameter is treated as nuissance. 
+```{r}
+nuisance(beta1)
+```
+Note, that here we automatically are using 100 boosting iterations `mstop = 100`, as this is the default value. 
+
+Similarly, we can fit a model with smooth effect for `pain`
+```{r}
+beta2 <- betaboost(QoL ~ s(pain) + arm, data = dataqol, 
+                   form.type = "classic")
+```
+and plot the corresponding smooth effect for the explanatory variable `pain` on the outcome `QoL`.
+```{r}
+plot(beta2, which = "pain")
+```
+
+The effect represents the estimate f(`pain`) evaluated at the different observations. This effect does not vary with other variables, but depends only on the `pain` value.
+
+As for all boosting methods, we need to tune the model regarding the number of boosting iterations `mstop` via cross-validation or bootstrap procuedures which are implemented in `cvrisk()`. Note that the function uses 25-fold bootstrap per default. 
+
+This takes a few seconds.
+```{r}
+set.seed(1234)
+cvr <- cvrisk(beta2)
+## extract optimal boosting iteration as determined via cvrisk
+mstop(cvr)
+## and plot the predictive risk (on out-of-bag observations) over the iterations
+plot(cvr)
+```
+
+The plot displays results from 25-fold bootstrap to optimize the number of boosting iterations. The gray lines indicate the performance (regarding predictive risk) for the 25 bootstrap samples. The solid black line represents the average performance; the optimal performance (minimal risk) is reached after 10 iterations (dashed vertical line).  
+
+Afterwards, we set the model to the optimal iteration:
+
+```{r}
+## set model to optimal stopping iteration:
+mstop(beta2) <- mstop(cvr)
+```
+As a result of early stopping, variable selection takes place and `pain` is no longer included in the final model:
+```{r}
+coef(beta2)
+```
+
+Now, we fit an extended beta regression model, where the precision parameter `phi` is 
+modeled as well. This is achieved by additionally providing a `phi.formula`:
+```{r}
+beta3 <- betaboost(QoL ~ arm + pain, 
+                   phi.formula = QoL ~ arm + pain, 
+                   data = dataqol)
+coef(beta3, off2int = TRUE)
+```
+
+We fit the model again with a smooth effect for pain:
+```{r}
+beta4 <- betaboost(QoL ~ arm + s(pain), 
+                   phi.formula = QoL ~ arm + s(pain),
+                   data = dataqol, form.type = "classic")
+par(mfrow = c(1,2))
+plot(beta4, which =  "pain")
+```
+
+Now, we get two plots: The smooth effect of the pain variable on the mean parameter `mu` (left) and the precision parameter `\phi` (right) in an extended beta regression model for the Quality of Life outcome. The curves represent the estimates for f(`pain`) in the two parameter models, evaluated at the different observations and hence depend only on the `pain` value. 
+
+### Predictions
+
+We can also look at the fitted values or predict new observations: 
+
+```{r}
+# fitted values
+preds <- predict(beta4, type = "response")
+summary(cbind(preds$mu, preds$phi))
+```
+
+
+```{r}
+# predictions for two new obs from the two treatment arms
+predict(beta3, newdata = data.frame(pain = c(30, 30), arm = c(0,1)), 
+                 type = "response")
+```
+
+As `arm` was not selected for the precision part of the model, only `mu` is influenced by the treatment arm, `phi` stays the same.
+
+### Compare R$^2$ measures for the four boosting models
+
+```{r}
+cbind("lin" = R2.betaboost(beta1, data = dataqol), 
+      "smooth" = R2.betaboost(beta2[100], data = dataqol),
+      "ext. lin" = R2.betaboost(beta3, data = dataqol),
+      "ext. smooth" = R2.betaboost(beta4, data = dataqol))
+```
+
+
+
+
+## Example 2: Comparison of `betareg` and `betaboost`
+
+The second data set is a standard example for beta regression. The outcome is the proportion of income spent on food for a random sample of 38 households in a large US city. The data set is freely available and included in the `betareg` package.
+```{r init, warning=FALSE, message=FALSE}
+## load betareg and data
+library(betareg)
+data(FoodExpenditure)
+``` 
+
+First, we fit the standard beta regression model to the data with `betareg`:
+```{r}
+beta1 <- betareg(I(food/income) ~ income + persons, 
+                 data = FoodExpenditure)
+```
+
+Now, we fit a boosted beta regression model with `betaboost`:
+```{r}
+beta2 <- betaboost(I(food/income) ~ income + persons, 
+                   data = FoodExpenditure)
+```
+
+If we compare the estimated coefficients of the methods 
+```{r}
+rbind("betareg" = coef(beta1), 
+      "betaboost" = c(coef(beta2, off2int = TRUE), 
+                      nuisance(beta2)))
+```
+we see that there are only minor differences. If we increase the number of boosting
+iterations to 500 iterations,  the boosting model converges to the standard solution of `betareg`:
+```{r}
+mstop(beta2) <- 500
+## compare again
+rbind("betareg" = coef(beta1), 
+      "betaboost" = c(coef(beta2, off2int = TRUE), 
+                      nuisance(beta2)))
+```
+
+The following graphic is a coefficient plot for 500 boosting iterations (coefficient estimates on the y-axis and number of boosting iteration on the x axis). One can observe how the algorithm rapidly converges to the same effect estimates as those obtained from the standard software `betareg`. In fact, after the first 100 boosting iterations there are only minor changes in the coefficients :
+```{r}
+plot(beta2, off2int = TRUE, main = "boosting")
+```
+
+Note that `betaboost` incorporates additionally also a matrix interface, which is particularly advantageous in case of larger or even high-dimensional models. Instead of using the formula interface, the user only needs to provide the response `y` and a matrix `x`. Via `mat.parameter = c("mean","both")` and `mat.effect = c("linear","smooth")` the user can specify weather to apply classical or extended beta regression, and if linear or non-linear effects are assumed. 
+
+```{r}
+## Fit same model than beta2 but via matrix interface
+beta2b <- betaboost(y = FoodExpenditure$food/FoodExpenditure$income, 
+                    x = cbind(FoodExpenditure$income, FoodExpenditure$persons),
+                    iterations = 500)
+coef(beta2b)
+```
+
+
+```{r}
+## Now extended beta regression
+beta2c <- betaboost(y = FoodExpenditure$food/FoodExpenditure$income, 
+                    x = cbind(income = FoodExpenditure$income, persons = FoodExpenditure$persons),
+                    iterations = 500, mat.parameter = "both", 
+                    mat.effect = "linear")
+coef(beta2c)
+```
